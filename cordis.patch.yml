@@ -1,0 +1,11 @@
+# dsh-music-pipeline bundle patch：挂载音乐流水线插件。
+#
+# host 半边注册两个工具：
+#   music_scan      扫描网易云下载目录，返回待处理 NCM/FLAC 清单（只读）
+#   music_transfer  把「准备传输」的 FLAC 复制到 OTG 挂载点，MD5 校验后删手机源（高危，需手动触发）
+#
+# 真正干活的是随插件打包在 scripts/ 下的两个脚本，
+# 插件只做 execFile 调用包装，不改脚本逻辑。
+- insert:
+    - id: music-pipeline
+      name: dsh-music-pipeline

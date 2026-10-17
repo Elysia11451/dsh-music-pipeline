@@ -1,0 +1,30 @@
+{
+  "name": "dsh-music-pipeline",
+  "version": "0.1.0",
+  "description": "音乐流水线：扫描网易云下载目录、OTG 传卡（包装既有脚本，只做调用不改逻辑）",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "node run-tests.mjs"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "lib/ncm-decryptor.js",
+    "scripts/ncm-auto-convert.mjs",
+    "scripts/ncm-otg-transfer.mjs",
+    "test/ncm-decryptor.test.js",
+    "run-tests.mjs",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0",
+    "@deepseek-ai/cordis": ">=0.1.0-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
