@@ -8,60 +8,55 @@
 //   1. 不修改脚本逻辑，只 execFile 调用、解析 stdout 日志行；
 //   2. music_scan 纯只读——自己 readdir，不跑转换脚本（转换脚本会真转+归档）；
 //   3. music_transfer 直接把挂载点当位置参数传给传输脚本（脚本本身支持候选挂载点参数）。
+//   4. 平台差异一律委托 lib/platform.js，本文件不出现任何 /storage、/data 之类硬编码路径。
 'use strict'
 
-import { execFile } from 'node:child_process'
-import { readdirSync, statSync, existsSync } from 'node:fs'
-import { join, posix, dirname } from 'node:path'
+import { readdirSync } from 'node:fs'
+import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import platform, { execFileP, nodeExecutable, isRemovableMount, mountLabel } from './lib/platform.js'
 
 // ESM 里没有 __dirname，用 import.meta.url 反推本文件所在目录。
 // 插件经 node_modules/<pkg> 软链挂载，源码目录就是安装目录——脚本路径从这里派生，
 // 打包/安装到任何位置都不需要再改硬编码路径。
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
-// Android 上 process.execPath=/apex/.../linker64（不是真 Node），spawn 它必挂；
-// argv0 是用户实际启动的 node 入口，优先用它，退化才用 execPath。
-function nodeExecutable() {
-  const a0 = process.argv0
-  if (a0 && posix.isAbsolute(a0) && existsSync(a0)) return a0
-  return process.execPath
-}
-
-// promisify(execFile) 在本机 Android/Node 下会产出自相矛盾的错误对象（e.code/signal/killed 全 undefined，
-// message 却是无关文本），改用 callback 包 Promise，行为可预期。
-function execFileP(cmd, args, opts) {
-  return new Promise((resolve, reject) => {
-    execFile(cmd, args, opts, (error, stdout, stderr) => {
-      if (error) {
-        error.stdout = stdout
-        error.stderr = stderr
-        reject(error)
-      } else {
-        resolve({ stdout, stderr })
-      }
-    })
-  })
-}
+// nodeExecutable()/execFileP() 原先在本文件里各写了一份，与 lib/platform.js 重复。
+// 现在统一从 platform 取：nodeExecutable 解决 Android 上 process.execPath 指向
+// /apex/.../linker64（不是真 Node）导致 spawn 必挂的问题；execFileP 绕开
+// promisify(execFile) 在本机 Android/Node 下产出自相矛盾错误对象的问题。
 
 const name = 'music-pipeline'
 const inject = ['tools']
 
-// 可配置项：三个目录。Schemastery 可用时给 schema 校验/默认值，不可用时退化为普通默认对象（不阻塞挂载）
-// 默认值只指向 Android 标准下载目录，不含设备专属路径；manifest/日志由传输脚本按 homedir 派生。
+// 可配置项：三个目录 + 两个外部工具/挂载点。Schemastery 可用时给 schema 校验/默认值，
+// 不可用时退化为普通默认对象（不阻塞挂载）。
+// 默认值一律走 platform.defaultDirs()——Android 用公共下载目录、桌面用 home 下 Music，
+// 换机器只改配置不改源码；刻意不含任何设备专属路径。
 const DEFAULTS = {
-  downloadDir: '/storage/emulated/0/Download/netease/cloudmusic/Music',
-  stagingDir: '/storage/emulated/0/Download/准备传输',
-  processedDir: '/storage/emulated/0/Download/已处理NCM',
+  ...platform.defaultDirs(),
+  // ffmpeg 路径：内置纯 JS 解密不转码，只有「非 FLAC 产物无损转 FLAC」才用得到 ffmpeg。
+  // 消费点有两处：
+  //   ① music_scan 用它做探测并把结果报出来（诊断「为什么某首歌没进准备传输」）
+  //   ② 转换脚本由 cron 独立驱动，它读自己的 --ffmpeg / NCM_FFMPEG，
+  //      所以要让 cron 跑转码仍需把同一路径配到那两处之一——本项不会自动传给它。
+  ffmpegPath: '',
+  // OTG 挂载点：留空 = 每次调用 music_transfer 时由参数显式指定。
+  // 桌面平台（Windows 盘符 / macOS /Volumes）没有统一外置存储根，必须显式指定。
+  otgMountPoint: '',
 }
+// defaultDirs() 的 storageRoot 在桌面平台是 null，不能塞进 Config Schema（string 校验会挂）
+delete DEFAULTS.storageRoot
 
 export const Config = await (async () => {
   try {
     const { default: Schema } = await import('schemastery')
     return Schema.object({
-      downloadDir: Schema.string().default(DEFAULTS.downloadDir).description('网易云下载目录（扫描 .ncm/.flac 的来源）'),
+      downloadDir: Schema.string().default(DEFAULTS.downloadDir).description('网易云下载目录（扫描加密文件/FLAC 的来源）'),
       stagingDir: Schema.string().default(DEFAULTS.stagingDir).description('待传输 FLAC 的暂存目录'),
-      processedDir: Schema.string().default(DEFAULTS.processedDir).description('已转换归档的 NCM 子目录'),
+      processedDir: Schema.string().default(DEFAULTS.processedDir).description('已转换归档的加密文件子目录'),
+      ffmpegPath: Schema.string().default('').description('ffmpeg 可执行文件路径，留空则自动探测。仅用于 music_scan 的诊断提示；cron 跑的转换脚本要转码需另配 --ffmpeg 或 NCM_FFMPEG'),
+      otgMountPoint: Schema.string().default('').description('OTG 挂载点，如 /storage/<卷标> 或 E:\\，留空则每次调用时由参数指定'),
     })
   } catch {
     return { ...DEFAULTS }
@@ -94,7 +89,7 @@ function makeTools(ctx) {
     {
       name: 'music_scan',
       description:
-        '扫描网易云音乐下载目录，返回待处理的 NCM/FLAC 文件列表。不修改任何文件。' +
+        '扫描网易云音乐下载目录，返回待处理的加密文件/FLAC 列表。不修改任何文件。' +
         '只读操作，可随时调用。',
       parameters: {
         type: 'object',
@@ -112,33 +107,58 @@ function makeTools(ctx) {
           properties: {
             files: { type: 'array', items: { type: 'string' } },
             count: { type: 'number' },
+            ffmpeg: { type: ['string', 'null'] },
+            note: { type: 'string' },
           },
           required: ['files', 'count'],
           additionalProperties: false,
         },
         render: (_args, value) => [{
           type: 'text',
-          text: value.count === 0
-            ? '下载目录里没有待处理的 .ncm / .flac 文件。'
-            : '待处理 ' + value.count + ' 个文件：\n' + value.files.map((f) => '  ' + f).join('\n'),
+          text: (value.count === 0
+            ? '下载目录里没有待处理的加密音频 / FLAC 文件。'
+            : '待处理 ' + value.count + ' 个文件：\n' + value.files.map((f) => '  ' + f).join('\n'))
+            + (value.note ? '\n' + value.note : ''),
         }],
       },
       isConcurrencySafe: () => true,
       async execute(args) {
         // 独立扫描，不调用转换脚本（那脚本一跑就真转+归档）。目录不存在时返回空清单而非报错。
-        // 优先级：调用参数 > 插件配置 > 内置默认（Android 标准下载目录）
+        // 优先级：调用参数 > 插件配置 > 平台中性默认值
         const MUSIC_DIR = String(args?.downloadDir || cfg('downloadDir') || DEFAULTS.downloadDir)
         let names = []
         try { names = readdirSync(MUSIC_DIR) } catch (e) {
           throw new Error('music_scan: 无法读取下载目录 ' + MUSIC_DIR + '：' + e.message)
         }
+        // 扫描范围跟着 lib/decrypt 注册表走——新增解密格式时这里零改动。
+        // 用 __dirname 派生绝对路径而非相对说明符：相对 import 在插件被 symlink 到
+        // node_modules 后会解析到宿主的 node_modules 外面，直接 ERR_MODULE_NOT_FOUND。
+        const { SUPPORTED_EXTENSIONS } = await import(join(__dirname, 'lib', 'decrypt', 'index.js'))
+        const want = new Set(SUPPORTED_EXTENSIONS.map((e) => e.toLowerCase()))
         const files = names
           .filter((f) => {
             const lower = f.toLowerCase()
-            return lower.endsWith('.ncm') || (lower.endsWith('.flac') && !lower.endsWith('.backup.flac'))
+            if (lower.endsWith('.flac') && !lower.endsWith('.backup.flac')) return true
+            const ext = lower.slice(lower.lastIndexOf('.'))
+            return want.has(ext)
           })
-          .map((f) => MUSIC_DIR + '/' + f)
-        return { files, count: files.length }
+          .map((f) => join(MUSIC_DIR, f))
+
+        // ffmpeg 探测结果一并报出来：这是 ffmpegPath 配置项在 host 侧的消费点。
+        // 非 FLAC 封装的源（如 MP3-in-NCM）解密后要靠 ffmpeg 无损转 FLAC，
+        // 缺 ffmpeg 时那类文件会停在 needs-transcode——扫描时就把话说清，
+        // 免得用户只看到「某首歌不见了」去瞎猜。
+        let ffmpeg = null
+        try {
+          ffmpeg = platform.findToolPath('ffmpeg', { explicit: String(cfg('ffmpegPath') || '') })
+        } catch (e) {
+          // 配置了但路径无效：findToolPath 抛错。不静默——把原因放进 note，
+          // 但扫描本身照做（ffmpeg 只影响一类文件的转码，不该挡住清单输出）。
+          return { files, count: files.length, ffmpeg: null, note: 'ffmpeg 配置有问题：' + e.message }
+        }
+        const note = ffmpeg ? null
+          : '未检测到 ffmpeg：MP3/OGG 封装的源解密后无法转成 FLAC，会停在 needs-transcode（不删源）。需要时在配置 ffmpegPath 填路径或让 ffmpeg 出现在 PATH。'
+        return note ? { files, count: files.length, ffmpeg, note } : { files, count: files.length, ffmpeg }
       },
     },
 
@@ -153,10 +173,10 @@ function makeTools(ctx) {
         properties: {
           targetMountPoint: {
             type: 'string',
-            description: 'OTG 存储卡挂载点绝对路径，如 /storage/<卷标>',
+            description: 'OTG 存储卡挂载点：Android 传 /storage/<卷标>，Windows 传盘符如 E:\\，macOS 传 /Volumes/<卷名>。不传则用插件配置 otgMountPoint',
           },
         },
-        required: ['targetMountPoint'],
+        required: [],
         additionalProperties: false,
       },
       output: {
@@ -180,16 +200,33 @@ function makeTools(ctx) {
       },
       isConcurrencySafe: () => false,
       async execute(args) {
-        const mnt = String(args.targetMountPoint || '').trim()
-        if (!mnt.startsWith('/storage/') || mnt.startsWith('/storage/emulated')) {
-          throw new Error('music_transfer: targetMountPoint 必须是 /storage/ 下的外置挂载点（不能是 /storage/emulated 手机内部存储）')
+        // 挂载点来源：调用参数 > 插件配置 otgMountPoint
+        const mnt = String(args?.targetMountPoint || cfg('otgMountPoint') || '').trim()
+        if (!mnt) {
+          throw new Error(
+            'music_transfer: 未指定目标挂载点。请传 targetMountPoint，或在插件配置里填 otgMountPoint。\n' +
+            '  Android: /storage/<卷标>\n  Windows: 盘符（如 E:\\）\n  macOS: /Volumes/<卷名>',
+          )
+        }
+        // 平台中性的外置挂载点判定：Android 要求 /storage/ 下且不是内部存储；
+        // Windows 要求非系统盘的盘符根；macOS 要求 /Volumes/ 下的卷。
+        if (!isRemovableMount(mnt)) {
+          throw new Error(
+            'music_transfer: targetMountPoint 不是可识别的『外置』挂载点：' + mnt + '\n' +
+            '  当前平台：' + platform.PLATFORM_NAME + '\n' +
+            '  Android 传 /storage/<卷标>（不能是 /storage/emulated 手机内部存储）\n' +
+            '  Windows 传盘符（如 E:\\，不能是系统盘）\n' +
+            '  macOS 传 /Volumes/<卷名>',
+          )
         }
         let stdout
         try {
-          // 脚本约定：位置参数是挂载短名（脚本内部拼 /storage/<短名>），这里从绝对路径提取短名再传
-          // --yes-delete-ncm 复用用户此前已确认的「传完删源」语义
-          // 防止 ASI 分号陷阱：上一行必须以分号结尾，否则下一行以 ( 开头时会被 JS 引擎合并解析
-          const shortName = posix.basename(mnt);
+          // 脚本约定：位置参数是挂载短名（脚本内部拼 <存储根>/<短名>）。
+          // mountLabel() 统一把绝对路径（/storage/ABCD-1234、E:\）和裸卷标都归一成短名，
+          // 修掉原先「传绝对路径会被拼成 /storage//storage/xxx」的坑。
+          // --yes-delete-ncm 复用用户此前已确认的「传完删源」语义。
+          // 防 ASI 分号陷阱：上一行以分号结尾，本行行首再补一个分号双保险
+          const shortName = mountLabel(mnt, platform.storageRoot());
           ;({ stdout } = await execFileP(nodeExecutable(), [TRANSFER_SCRIPT, shortName, '--yes-delete-ncm'], {
             timeout: 300000,
             maxBuffer: 10 * 1024 * 1024,

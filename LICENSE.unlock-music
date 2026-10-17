@@ -1,0 +1,42 @@
+MIT License
+
+Copyright (c) 2019-2023 MengYX
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+## 为什么随包分发这份许可证文本
+
+本仓库的 NCM 解密实现（lib/ncm-decryptor.js）在开发时把 Unlock Music
+(unlock-music/unlock-music) 作为格式事实的**补充参考**（见该文件头部注释）。
+
+**本仓库未复制 Unlock Music 的任何源码文件** —— 只引用了其文档中公开的
+容器结构与固定密钥常量。KGM / QMC / KWM 的移植来源是 OpenConverter
+(Apache-2.0)，与 Unlock Music 无代码关系；逐条来源与采纳范围见
+THIRD_PARTY_NOTICES.md。
+
+附上本文属于礼节性保留（belt-and-suspenders）：
+
+1. 若未来审计认为「引用公开算法事实」仍构成某种关联，MIT 本身允许商用与
+   再分发，附全文无损失；
+2. Unlock Music 的 GitHub 仓库已被 DMCA takedown，原文不再易得。本文
+   取自其镜像站 raw.gitcode.com/linzulu/unlock-music（2026-10-18 抓取），
+   版权行 Copyright (c) 2019-2023 MengYX 为原文照录，未经改动。
+

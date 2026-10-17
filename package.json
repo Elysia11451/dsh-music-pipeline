@@ -1,22 +1,38 @@
 {
   "name": "dsh-music-pipeline",
-  "version": "0.1.0",
-  "description": "音乐流水线：扫描网易云下载目录、OTG 传卡（包装既有脚本，只做调用不改逻辑）",
+  "version": "0.2.0",
+  "description": "音乐流水线：全格式加密音频（NCM/KGM/VPR/QMC/KWM）内置解密、规范重命名、OTG 传卡校验（Windows + Android 双平台）",
   "type": "module",
   "main": "index.js",
+  "license": "MIT",
   "scripts": {
-    "test": "node run-tests.mjs"
+    "test": "node run-tests.mjs",
+    "e2e": "node test/e2e-v0.2.0.mjs",
+    "verify:ffmpeg": "node scripts/verify-ffmpeg-wiring.cjs",
+    "verify:asi": "node scripts/asi-scan.cjs .",
+    "gen:tables": "node scripts/gen-decrypt-tables.cjs"
   },
   "files": [
-    "index.js",
+    "CHANGELOG.md",
+    "LICENSE",
+    "LICENSE-APACHE-2.0.txt",
+    "LICENSE.unlock-music",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md",
     "cordis.patch.yml",
+    "index.js",
+    "lib/decrypt/",
     "lib/ncm-decryptor.js",
+    "lib/platform.js",
+    "run-tests.mjs",
+    "scripts/gen-decrypt-tables.cjs",
     "scripts/ncm-auto-convert.mjs",
     "scripts/ncm-otg-transfer.mjs",
+    "test/decrypt-formats.test.js",
+    "test/decrypt-registry.test.js",
+    "test/e2e-v0.2.0.mjs",
     "test/ncm-decryptor.test.js",
-    "run-tests.mjs",
-    "README.md",
-    "CHANGELOG.md"
+    "test/platform-crossplatform.test.js"
   ],
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0",

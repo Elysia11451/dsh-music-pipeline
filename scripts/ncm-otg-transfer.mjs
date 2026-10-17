@@ -4,38 +4,65 @@
 // v3 新增: ①传卡前查重——卡里已有同名同 MD5 文件 → 核实(卡上副本 jsCheck 完好)后删手机 FLAC
 //         ②传后检查——复制+MD5 一致后再对卡上副本跑 JS 结构校验，坏的删卡上副本、保留手机源
 // 规则: NCM 删除仍需 --yes-delete-ncm 二次确认；FLAC 删除均先记 WILL DELETE 日志
+//
+// v0.2.0 跨平台改造：
+//   - 路径常量改走 lib/platform.js（环境变量 > 平台中性默认值），不再写死 /storage/emulated/0
+//   - 去掉「无参数时默认候选 ABCD-1234」这种设备专属卷标猜测：没有可用挂载点就明确报错退出
+//   - Windows 盘符（E:\）经 mountLabel 归一成短名后，由 platform.mountPath 拼回盘符根
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync, copyFileSync, existsSync, readdirSync, statSync, unlinkSync, appendFileSync, openSync, readSync, closeSync } from "node:fs";
+import { readFileSync, writeFileSync, copyFileSync, existsSync, readdirSync, statSync, unlinkSync, appendFileSync, openSync, readSync, closeSync, renameSync } from "node:fs";
 import { join, basename } from "node:path";
-import { homedir } from "node:os";
+import platform from "../lib/platform.js";
 
-// 路径全部可配置：环境变量 > 中性默认值（不绑定任何具体机器）。
-// OUT_DIR 是待传输 FLAC 的暂存目录，ARCHIVE_DIR 是已转换 NCM 的归档目录。
-const HOME = homedir();
-const OUT_DIR = process.env.NCM_STAGING_DIR || "/storage/emulated/0/Download/准备传输";
-const ARCHIVE_DIR = process.env.NCM_ARCHIVE_DIR || "/storage/emulated/0/Download/netease/cloudmusic/Music/已处理NCM";
-const STORAGE_ROOT = process.env.NCM_STORAGE_ROOT || "/storage";
-const MANIFEST = process.env.NCM_MANIFEST || join(HOME, "ncm-manifest.jsonl");
-const LOG = process.env.NCM_TRANSFER_LOG || join(HOME, "ncm-transfer.log");
+// 路径全部可配置：环境变量 > 平台中性默认值（不绑定任何具体机器）。
+// OUT_DIR 是待传输 FLAC 的暂存目录，ARCHIVE_DIR 是已转换加密文件的归档目录。
+// storageRoot 在桌面平台（Windows/macOS/桌面 Linux）没有统一概念，为 null——
+// 此时 mountPath 直接把卷标当路径本身，调用方必须传盘符或 /Volumes/<卷名>。
+const DEF = platform.defaultDirs();
+const HOME = platform.homeDir();
+const OUT_DIR = process.env.NCM_STAGING_DIR || DEF.stagingDir;
+const ARCHIVE_DIR = process.env.NCM_ARCHIVE_DIR || DEF.processedDir;
+const STORAGE_ROOT = process.env.NCM_STORAGE_ROOT || DEF.storageRoot || "";
+const MANIFEST = process.env.NCM_MANIFEST || DEF.manifest;
+const LOG = process.env.NCM_TRANSFER_LOG || DEF.transferLog;
 const log = (msg) => { const line = `[${new Date().toISOString()}] ${msg}`; console.log(line); try { appendFileSync(LOG, line + "\n"); } catch {} };
 const YES = process.argv.includes("--yes-delete-ncm");
-// 兼容清洗：调用方可能传短名（卷标）也可能传绝对路径（/storage/<卷标>）。
-// 一律归一成短名，后面统一 join 出 /storage/<短名>，避免 "/storage//storage/xxx" 这类拼坏。
+// 兼容清洗：调用方可能传短名（卷标）也可能传绝对路径（/storage/<卷标>、E:\）。
+// mountLabel() 负责把各种形态归一成短名，桌面平台（STORAGE_ROOT 为空）时原样返回。
+// 历史坑：直接字符串拼 '/storage/' + m，传入绝对路径会拼成 /storage//storage/xxx，existsSync 永假。
+//
+// 但「传进来的绝对路径本身可能就是挂载点」——例如 Windows 的 E:\（没有父目录概念），
+// 或测试时用一个真实存在的目录当假卡。所以归一后先按「短名 → 拼存储根」找，找不到再
+// 直接拿原始值当路径找一遍；两轮都找不到才报错。
 function mountShortName(v) {
-  let s = String(v || "").trim().replace(/\/+$/, "");   // 去掉尾斜杠
-  if (s === STORAGE_ROOT) return "";                     // "/storage" 本身不是挂载点
-  const idx = s.indexOf(STORAGE_ROOT + "/");
-  if (idx >= 0) s = s.slice(idx + STORAGE_ROOT.length + 1); // 取 /storage/ 之后的部分
-  const parts = s.split("/").filter(Boolean);
-  return parts.length ? parts[parts.length - 1] : "";     // 只认最后一段当卷标
+  return platform.mountLabel(v, STORAGE_ROOT || null);
+}
+/** 把短名拼回完整挂载路径；桌面平台无 STORAGE_ROOT 时短名即路径 */
+function mountFullPath(shortName) {
+  return STORAGE_ROOT ? join(STORAGE_ROOT, shortName) : platform.mountPath(shortName, null);
 }
 const candidates = process.argv.slice(2).filter((a) => !a.startsWith("--"));
-const mounts = candidates.map(mountShortName).filter(Boolean);
+// 保留「原始值 ↔ 归一短名」的配对：下面探测要对每个候选各做两轮
+// （先按短名拼存储根，再拿原始值直接当路径），不能只兜底第一个候选——
+// 否则传多个挂载点时，第二、三个的原始路径永远不会被直接尝试。
+const mounts = candidates
+  .map((raw) => ({ raw: String(raw).trim(), label: mountShortName(raw) }))
+  .filter((x) => x.label);
 if (candidates.length && !mounts.length) {
-  log(`ERROR no usable mount name in args: ${candidates.join(", ")} (传 /storage/<卷标> 或直接 <卷标>)`);
+  log(`ERROR no usable mount name in args: ${candidates.join(", ")} (Android 传 /storage/<卷标> 或直接 <卷标>；Windows 传盘符如 E:\\；macOS 传 /Volumes/<卷名>)`);
   process.exit(2);
 }
-if (!mounts.length) mounts.push("62B8-A13F");             // 无参数时的历史默认候选
+if (!mounts.length) {
+  // v0.2.0 删掉了写死的默认候选卷标（设备专属，换机器必炸）。
+  // 没有参数又没配置挂载点时，明确报错让人显式指定，绝不猜。
+  // 提示里刻意用占位符 <卷标> 而不是任何真实卷标——提示是给人看的模板，
+  // 写死具体卷标会被误当成「这台设备的正确答案」，从而把猜测行为从代码搬进人的习惯。
+  const hint = STORAGE_ROOT
+    ? `请传卷标候选，如 node ${basename(process.argv[1] || 'ncm-otg-transfer.mjs')} <卷标>`
+    : `当前平台（${platform.PLATFORM_NAME}）无外置存储根，请显式传挂载点：Windows 传盘符（如 E:\\），macOS 传 /Volumes/<卷名>`;
+  log(`ERROR no OTG mount specified and no default available. ${hint}`);
+  process.exit(2);
+}
 const md5 = (p) => createHash("md5").update(readFileSync(p)).digest("hex");
 
 // --- 纯 JS FLAC 结构校验（自 scan-sdcard-audio.mjs 复用，只读） ---
@@ -111,14 +138,20 @@ function flacInfo(p) {
   } catch { return null }
 }
 
-log(`=== ncm-otg-transfer v3 start (yesDeleteNcm=${YES}) ===`);
-// 挂载点探测：join('/storage', 短名)，不再手工拼字符串（ESLint no-path-concat）
+log(`=== ncm-otg-transfer v3 start (yesDeleteNcm=${YES}, platform=${platform.PLATFORM_NAME}) ===`);
+// 挂载点探测：先按「短名 → 拼存储根」找（Android /storage/<卷标>、桌面盘符），
+// 找不到再拿调用方传的原始值直接当路径找（Windows E:\ 这类没有父目录的根，以及测试用的假卡目录）。
+// 不再用 isRemovableMount 在这里做前置拦截——那会拒绝「测试目录当假卡」这类合法场景，
+// 真正的外置盘校验由 index.js 的 music_transfer 在调用前做（用户面拦截，脚本面宽容）。
 let root = null;
 for (const m of mounts) {
-  const p = join(STORAGE_ROOT, m);
+  const p = mountFullPath(m.label);
   if (existsSync(p)) { root = p; break; }
+  // 第二轮：调用方传的原始值本身可能就是可用路径（Windows E:\ 根、测试假卡目录），
+  // 归一成短名再拼反而丢失信息，所以直接按原值试一次。
+  if (m.raw && existsSync(m.raw)) { root = m.raw; break; }
 }
-if (!root) { log(`ERROR no OTG mount found among: ${mounts.map((m) => join(STORAGE_ROOT, m)).join(", ")}`); process.exit(2); }
+if (!root) { log(`ERROR no OTG mount found among: ${mounts.map((m) => mountFullPath(m.label)).join(", ")}`); process.exit(2); }
 const musicDir = join(root, "Music");
 log(`mount=${root} music=${musicDir}`);
 
